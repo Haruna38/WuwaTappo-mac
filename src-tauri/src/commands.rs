@@ -295,6 +295,55 @@ pub struct UpdateMetadata {
     raw_json: serde_json::Value,
 }
 
+const API_HOST: &str = "https://api-wutheringwaves-wuwatappo.kurogames-global.com";
+
+async fn fetch_json(client: &reqwest::Client, url: &str) -> Result<serde_json::Value, String> {
+    client
+        .get(url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("{url}: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("{url}: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("{url}: invalid json: {e}"))
+}
+
+/// Resolve the updater manifest the same way the vendor app does:
+/// activity-config → `assets_host` → `latest-global_host.json` → `url`.
+/// The endpoint the frontend passes is normally the last hop already; if it
+/// is missing or unreachable we walk the chain ourselves instead of relying
+/// on a hard-coded URL (the one baked into the original binary is dead).
+async fn resolve_manifest_url(
+    client: &reqwest::Client,
+    hint: &str,
+) -> Result<tauri::Url, String> {
+    if let Ok(url) = tauri::Url::parse(hint.trim()) {
+        if url.scheme().starts_with("http") {
+            return Ok(url);
+        }
+    }
+    let cfg = fetch_json(client, &format!("{API_HOST}/api/common/activity-config")).await?;
+    let host = cfg
+        .pointer("/data/assets_host")
+        .and_then(|v| v.as_str())
+        .ok_or("activity-config has no assets_host")?
+        .trim_end_matches('/')
+        .to_string();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let host_json = fetch_json(client, &format!("{host}/app/json-host/latest-global_host.json?v={ts}")).await?;
+    let url = host_json
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or("latest-global_host.json has no url")?;
+    tauri::Url::parse(url).map_err(|e| format!("manifest url: {e}"))
+}
+
 /// The vendor manifest is a Tauri updater manifest except that `notes` is a
 /// locale→text map, which `tauri-plugin-updater` refuses to deserialize. We
 /// fetch and compare versions ourselves and only hand off to the plugin (for
@@ -306,24 +355,23 @@ pub struct UpdateMetadata {
 pub async fn check_app_update(
     app: AppHandle,
     webview: tauri::Webview,
-    endpoint: String,
+    endpoint: Option<String>,
 ) -> Result<Option<UpdateMetadata>, String> {
-    let url = tauri::Url::parse(endpoint.trim()).map_err(|e| format!("invalid endpoint: {e}"))?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
-    let raw: serde_json::Value = client
-        .get(url.clone())
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| format!("fetch failed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("fetch failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("invalid manifest json: {e}"))?;
+    let url = resolve_manifest_url(&client, endpoint.as_deref().unwrap_or("")).await?;
+    let raw = match fetch_json(&client, url.as_str()).await {
+        Ok(v) => v,
+        Err(e) if endpoint.as_deref().map_or(false, |h| !h.trim().is_empty()) => {
+            // The frontend's hint was stale; re-resolve from the live chain.
+            log::warn!("[UPDATE] manifest hint failed ({e}); resolving via activity-config");
+            let url = resolve_manifest_url(&client, "").await?;
+            fetch_json(&client, url.as_str()).await?
+        }
+        Err(e) => return Err(e),
+    };
 
     let current_version = app.package_info().version.to_string();
     let remote_version = raw

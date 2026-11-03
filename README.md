@@ -77,7 +77,7 @@ Logs: `~/Library/Logs/com.kuro.wuwatappo.global/wuwatappo.log` (Settings → "Vi
 | Game mode auto-detect | Triggers when the frontmost app has a full-screen window on the pet's display. |
 | Shortcuts | F7 game mode, F8 switch display, F9 hide/show pet (configurable; "Win" in the settings UI is ⌘). |
 | Autostart / Dock icon | LaunchAgent; "Show taskbar icon" toggles the Dock icon. |
-| Updater | Checks Kuro's manifest; there is no macOS artifact, so it reports "latest". If `darwin-*` entries appear, the stock Tauri updater path is used. |
+| Updater | Resolves the manifest the same way the vendor app does (activity-config, assets host, host json, manifest). There is no macOS artifact, so it reports "latest"; if `darwin-*` entries appear, the stock Tauri updater path is used. |
 | Not implemented | Gamepad clicks. |
 
 ## Layout
