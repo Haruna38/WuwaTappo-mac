@@ -33,6 +33,16 @@ menus, login, online sync, multiplayer rooms, full-screen overlay, shortcuts, au
 - The official Windows installer, e.g. `WuwaTappo-global_1.0.3_x64-setup.exe`
   (download it from Kuro Games' Wuwa Tappo site - the **Global** build)
 
+## Install (prebuilt)
+
+A prebuilt `.dmg` is published under **Releases**. It is self-signed, not notarized, so on
+first launch macOS will refuse to open it: right-click `Wuwa Tappo.app` > **Open** > **Open**
+(or `xattr -dr com.apple.quarantine "/Applications/Wuwa Tappo.app"`). The signature is stable
+across releases so the Input Monitoring grant survives updates.
+
+The prebuilt app embeds Kuro Games' frontend bundle, artwork and fonts, which remain their
+property. It is published only for convenience; it will be removed at Kuro Games' request.
+
 ## Build
 
 ```sh
