@@ -5659,7 +5659,7 @@ dependencies = [
 
 [[package]]
 name = "wuwatappo"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",

@@ -1,4 +1,4 @@
-# Frontend ↔ backend contract (Wuwa Tappo 1.0.3)
+# Frontend ↔ backend contract (Wuwa Tappo 1.0.4)
 
 What the vendor's frontend bundle expects from the native backend, as observed from its
 behaviour, and how this port provides it on macOS. This is a description of an interface,

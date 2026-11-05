@@ -8,7 +8,7 @@ unpacks those layers so the vendor's own assets are never redistributed with
 this repository.
 
 Usage:
-    python3 scripts/extract-dist.py [--dist] ~/Downloads/WuwaTappo-global_1.0.3_x64-setup.exe
+    python3 scripts/extract-dist.py [--dist] ~/Downloads/WuwaTappo-global_1.0.4_x64-setup.exe
 
 Requires: 7-Zip (`7zz`, `brew install sevenzip`) and `pip install brotli`.
 """

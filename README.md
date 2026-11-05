@@ -30,7 +30,7 @@ menus, login, online sync, multiplayer rooms, full-screen overlay, shortcuts, au
 - Xcode Command Line Tools (`xcode-select --install`)
 - Rust toolchain (`https://rustup.rs`), Node.js 18+, Python 3
 - 7-Zip and the `brotli` Python module: `brew install sevenzip && pip3 install brotli`
-- The official Windows installer, e.g. `WuwaTappo-global_1.0.3_x64-setup.exe`
+- The official Windows installer, e.g. `WuwaTappo-global_1.0.4_x64-setup.exe`
   (download it from Kuro Games' Wuwa Tappo site - the **Global** build)
 
 ## Install (prebuilt)
@@ -47,7 +47,7 @@ property. It is published only for convenience; it will be removed at Kuro Games
 
 ```sh
 git clone <this repo> && cd WuwaTappo-mac
-scripts/build.sh --dist /path/to/WuwaTappo-global_1.0.3_x64-setup.exe --open
+scripts/build.sh --dist /path/to/WuwaTappo-global_1.0.4_x64-setup.exe --open
 ```
 
 That does everything:

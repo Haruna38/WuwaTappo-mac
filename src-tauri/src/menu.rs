@@ -119,11 +119,13 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let state = app.state::<AppState>();
     let st = state.ui.lock().unwrap().menu.clone();
     let menu = build_menu(app, &st, false)?;
+    // Menu events are handled once by `Builder::on_menu_event` (lib.rs);
+    // `TrayIconBuilder::on_menu_event` registers into the same global list
+    // and would dispatch every click twice (toggles cancel out).
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .tooltip(&st.labels.tray_tooltip)
-        .on_menu_event(|app, event| handle_menu_event(app, event));
+        .tooltip(&st.labels.tray_tooltip);
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone()).icon_as_template(false);
     }

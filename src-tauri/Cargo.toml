@@ -1,6 +1,6 @@
 [package]
 name = "wuwatappo"
-version = "1.0.3"
+version = "1.0.4"
 description = "Wuwa Tappo (native macOS port)"
 edition = "2021"
 

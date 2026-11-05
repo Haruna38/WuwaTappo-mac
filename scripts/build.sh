@@ -2,7 +2,7 @@
 # One-shot build: extract the frontend from the official Windows installer,
 # apply the macOS patch, and produce Wuwa Tappo.app (+ .dmg).
 #
-#   scripts/build.sh --dist ~/Downloads/WuwaTappo-global_1.0.3_x64-setup.exe
+#   scripts/build.sh --dist ~/Downloads/WuwaTappo-global_1.0.4_x64-setup.exe
 #
 # Options:
 #   --dist <installer.exe>  Official Windows installer to extract dist/ from.
