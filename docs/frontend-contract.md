@@ -1,4 +1,4 @@
-# Frontend ↔ backend contract (Wuwa Tappo 1.0.4)
+# Frontend ↔ backend contract (Wuwa Tappo 1.0.5)
 
 What the vendor's frontend bundle expects from the native backend, as observed from its
 behaviour, and how this port provides it on macOS. This is a description of an interface,
@@ -39,10 +39,10 @@ Argument objects use camelCase keys. Unless noted, return values are ignored.
 - `show_toast_overlay()`, `hide_toast_overlay()`
 
 **Main overlay geometry**
-- `set_main_window_fullscreen_shell()` - size the overlay to its display
+- `set_main_window_fullscreen_shell({payload?:{x,y,width,height}})` - size the overlay to its display; with a payload (physical px, since 1.0.5) move it to that display, used to retry a display switch
 - `get_main_desktop_safe_area() → {insets:{left,top,right,bottom}, autoHideEdge?:"left"|"top"|"right"|"bottom", foregroundFullscreen:bool, foregroundApplicationFullscreen:bool}` - polled every 1.5 s; drives dock placement and auto game mode
 - `get_main_taskbar_insets() → {left,top,right,bottom}`, `get_taskbar_insets_at_point({payload:{x,y}})`
-- `apply_main_window_position({payload:{alwaysOnTop,position,applyPosition}})`
+- `apply_main_window_position({payload:{alwaysOnTop,position?,applyPosition,...}})` - `alwaysOnTop` is a user setting since 1.0.5 (the payload may carry the whole settings object); when off the overlay becomes a normal-level window that other apps can cover
 - `sync_main_window_to_current_monitor()`, `set_main_window_content_bounds(...)` (unused by this build)
 - Display switch: `set_main_window_monitor_bounds({payload:{x,y,width,height}})` (physical px, errors if a switch is in progress), `sync_aux_windows_to_main_monitor()`, `finish_main_window_monitor_switch()`
 - `set_main_skip_taskbar({skip})` - Dock icon visibility
@@ -56,7 +56,7 @@ Argument objects use camelCase keys. Unless noted, return values are ignored.
 
 **Menu, shortcuts, toast**
 - `sync_native_menu({labels:{openBag,openAtlas,openExchange,openRoom,hidePet,showPet,trayOpenSettings,dockSettings,windowSize,windowPassthrough,gameMode,windowOpacity,restart,quit,trayTooltip}, petDockVisible, petScale, windowOpacity, windowPassthrough, gameMode})`
-- `get_app_shortcuts() → {gameMode,switchScreen,togglePet}` with `{modifiers,key}`; `modifiers` bitmask Alt=1 Ctrl=2 Shift=4 Win/⌘=8; `key` is a Windows virtual-key code, 0 = unbound. Defaults F7/F8/F9.
+- `get_app_shortcuts() → {gameMode,switchScreen,togglePet,alwaysOnTop,autoGameModeOnFullscreen,disablePointerMonitoring}` (last three since 1.0.5, unbound by default) with `{modifiers,key}`; `modifiers` bitmask Alt=1 Ctrl=2 Shift=4 Win/⌘=8; `key` is a Windows virtual-key code, 0 = unbound. Defaults F7/F8/F9.
 - `set_app_shortcuts({config})` - reject with the string `"duplicate"` or `"occupied"`; emit `app-shortcuts-changed` on success
 - `set_shortcut_capture({active})` - suspend shortcuts while the user records one
 
@@ -72,6 +72,9 @@ Argument objects use camelCase keys. Unless noted, return values are ignored.
 - `get_installer_launch_locale() → string`, `save_app_ui_locale({locale})`
 - `check_app_update({endpoint}) → null | {rid,currentVersion,version,date,body,rawJson}` - Tauri updater metadata; `rid` must be usable with the updater plugin's `download`/`install`
 - `is_force_update_locked() → bool`
+- `reset_local_data({environment,localCount,cumulativeCount?,cuid,failureMessage})` (1.0.5, main window only) - "Reset App": keep the click totals, restore default shortcuts and autostart, clear the WebView profile, restart. Nothing happens in the frontend after the call resolves, so the backend must restart the app.
+- `load_reset_click_archive({environment,cuid}) → number` (1.0.5) - cumulative clicks saved for that account by the last reset, 0 if none; read after login
+- `run_network_diagnostics({region,apiBase,assetsHost?,preRelease,runId}) → {status:"complete"|"already_collected"|string, resource_url?, resource_source?}` (1.0.5) - native DNS/HTTPS probes written to the log when the app cannot reach the API
 - `is_elevated_autostart_enabled()`, `set_elevated_autostart({enabled})` - Windows only; macOS uses the autostart plugin
 - `exit_app()`
 - Installer/uninstaller commands (`*_nsis_*`, `get_installer_launch_mode`, `get_preferred_system_ui_languages`) belong to the Windows NSIS UI and are not needed.
@@ -86,11 +89,12 @@ All listeners are global (any window), so plain broadcasts work.
 | Event | Payload |
 |---|---|
 | `mouse-move` | `{x,y,memberId?}` - physical screen pixels |
+| `mouse-leave` | none (1.0.5) - the pointer left the overlay; the page drops hover state |
 | `mouse-button` | `{button:"left"\|"right"\|…, action:"press"\|"release", memberId?}` - routed input over the pet; a press counts a click |
 | `global-clap-mouse` | none - a click anywhere else, counts once |
 | `gamepad-button-press` | none (not implemented here) |
 | `key-press` / `key-release` | key name string (DOM `KeyboardEvent.key` style); a release counts a click |
-| `app-shortcut` | `"togglePet"` \| `"gameMode"` \| `"switchScreen"` |
+| `app-shortcut` | `"togglePet"` \| `"gameMode"` \| `"switchScreen"` \| `"alwaysOnTop"` \| `"autoGameModeOnFullscreen"` \| `"disablePointerMonitoring"` |
 | `app-shortcuts-changed` | shortcuts object |
 | `tray-quit`, `tray-restart`, `tray-toggle-pet-visibility`, `tray-toggle-window-passthrough`, `tray-toggle-game-mode` | none |
 | `tray-set-pet-scale`, `tray-set-window-opacity` | number |
@@ -108,6 +112,10 @@ The frontend registers its listeners asynchronously after mount, so window-open 
 not be emitted before the target window has registered its listener. This port patches the
 frontend's `listen` helper to call a `listener_ready {event}` command, and queues pending
 payloads until then.
+
+"Disable pointer monitoring" (1.0.5) has no command of its own: the page sets
+`windowPassthrough` in `set_main_hit_region` and ignores `mouse-move`. Since 1.0.5 the toast
+window also hides itself (`hide_toast_overlay`) after each toast and is re-shown on demand.
 
 Frontend ↔ frontend events (`cat-settings-*`, `cat-panel-*`, `cat-toast*`, monitor-switch
 handshakes, persist/disconnect-before-exit handshakes) only need the event plugin.

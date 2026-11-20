@@ -30,7 +30,7 @@ menus, login, online sync, multiplayer rooms, full-screen overlay, shortcuts, au
 - Xcode Command Line Tools (`xcode-select --install`)
 - Rust toolchain (`https://rustup.rs`), Node.js 18+, Python 3
 - 7-Zip and the `brotli` Python module: `brew install sevenzip && pip3 install brotli`
-- The official Windows installer, e.g. `WuwaTappo-global_1.0.4_x64-setup.exe`
+- The official Windows installer, e.g. `WuwaTappo-global_1.0.5_x64-setup.exe`
   (download it from Kuro Games' Wuwa Tappo site - the **Global** build)
 
 ## Install (prebuilt)
@@ -47,7 +47,7 @@ property. It is published only for convenience; it will be removed at Kuro Games
 
 ```sh
 git clone <this repo> && cd WuwaTappo-mac
-scripts/build.sh --dist /path/to/WuwaTappo-global_1.0.4_x64-setup.exe --open
+scripts/build.sh --dist /path/to/WuwaTappo-global_1.0.5_x64-setup.exe --open
 ```
 
 That does everything:
@@ -86,6 +86,9 @@ Logs: `~/Library/Logs/com.kuro.wuwatappo.global/wuwatappo.log` (Settings → "Vi
 | Frontend origin | Served from an in-process loopback server at `http://localhost:1421` (Kuro's socket.io server rejects WebSocket upgrades from `tauri://localhost`). A `document.cookie` shim keeps the session token, which the app stores in cookies. |
 | Game mode auto-detect | Triggers when the frontmost app has a full-screen window on the pet's display. |
 | Shortcuts | F7 game mode, F8 switch display, F9 hide/show pet (configurable; "Win" in the settings UI is ⌘). |
+| Always on top | On: the pet is pinned above everything, including full-screen apps. Off: it is a normal-level window that other windows can cover; clicking it raises it. |
+| Reset App | Keeps click totals, removes shortcuts/autostart, deletes the WebView profile on the next launch, restarts. |
+| Restart | Relaunches in the background, so it does not pull you out of a full-screen Space. |
 | Autostart / Dock icon | LaunchAgent; "Show taskbar icon" toggles the Dock icon. |
 | Updater | Resolves the manifest the same way the vendor app does (activity-config, assets host, host json, manifest). There is no macOS artifact, so it reports "latest"; if `darwin-*` entries appear, the stock Tauri updater path is used. |
 | Not implemented | Gamepad clicks. |
@@ -97,6 +100,7 @@ Logs: `~/Library/Logs/com.kuro.wuwatappo.global/wuwatappo.log` (Settings → "Vi
 | `scripts/build.sh` | One-shot build (`--dist`, `--debug`, `--adhoc`, `--open`) |
 | `scripts/extract-dist.py` | Installer → `dist/` + icons (never committed) |
 | `scripts/patch-dist.py` | The single frontend patch |
+| `scripts/sync-permissions.py` | Regenerates the command ACL (`build.rs`, `capabilities/default.json`) from the command table; run after adding a command |
 | `scripts/make-signing-identity.sh` | Local code-signing identity |
 | `src-tauri/src/lib.rs` | Plugin wiring, command table, main-thread watchdog |
 | `src-tauri/src/windows.rs` | All windows (overlay, toast, panel, login, update/maintenance, about, OSS notice) and window commands |
@@ -106,5 +110,5 @@ Logs: `~/Library/Logs/com.kuro.wuwatappo.global/wuwatappo.log` (Settings → "Vi
 | `src-tauri/src/commands.rs` | Logging, diagnostics, counters, shortcuts, locale, native-menu sync, updater bridge |
 | `src-tauri/src/server.rs` | Loopback asset server |
 | `src-tauri/src/storage.rs` | JSON persistence under `~/Library/Application Support/com.kuro.wuwatappo.global/` |
-| `src-tauri/src/init.js` | Per-window init script (cookie shim, console → log) |
+| `src-tauri/src/init.js` | Per-window init script (cookie shim, click-to-focus for sliders, console to log) |
 | `docs/frontend-contract.md` | Frontend ↔ backend interface the port implements (commands, events, windows, auth flow) |

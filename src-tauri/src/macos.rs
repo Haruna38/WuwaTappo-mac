@@ -5,7 +5,7 @@
 //! Everything here that touches AppKit objects must run on the main thread.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};
@@ -18,12 +18,13 @@ use core_graphics::window::{
     kCGWindowListOptionOnScreenOnly,
 };
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly, Message};
+use objc2::{define_class, msg_send, AllocAnyThread, MainThreadMarker, MainThreadOnly, Message};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::ClassType;
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSCursor, NSEvent, NSPanel, NSScreen, NSView,
-    NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask, NSWorkspace,
+    NSApplication, NSAutoresizingMaskOptions, NSCursor, NSEvent, NSPanel, NSScreen,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowOrderingMode, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSDictionary, NSNumber, NSPoint, NSRect, NSString, NSUserDefaults};
 use serde::Serialize;
@@ -48,6 +49,40 @@ pub const LEVEL_TOAST: isize = 1001;
 pub const LEVEL_MENU_PARKED: isize = 3;
 
 static CURSOR_KIND: AtomicU8 = AtomicU8::new(0);
+/// Mirrors the frontend's "Always on top" setting (see `set_always_on_top`).
+static ALWAYS_ON_TOP: AtomicBool = AtomicBool::new(true);
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGSMainConnectionID() -> i32;
+    fn CGSSetConnectionProperty(
+        cid: i32,
+        target_cid: i32,
+        key: core_foundation::string::CFStringRef,
+        value: core_foundation::base::CFTypeRef,
+    ) -> i32;
+}
+
+/// Let this process change the cursor while it is not the active app.
+/// The overlay never activates (the game keeps focus), and without this
+/// WindowServer ignores `NSCursor.set()` from a background application, so
+/// the pointer/grab cursors over the pet would never show.
+pub fn enable_background_cursor() {
+    let key = CFString::from_static_string("SetsCursorInBackground");
+    let value = core_foundation::boolean::CFBoolean::true_value();
+    unsafe {
+        let cid = CGSMainConnectionID();
+        CGSSetConnectionProperty(cid, cid, key.as_concrete_TypeRef(), value.as_CFTypeRef());
+    }
+}
+
+pub fn set_always_on_top(on: bool) {
+    ALWAYS_ON_TOP.store(on, Ordering::Relaxed);
+}
+
+fn apply_current_cursor() {
+    cursor_for(kind_from_u8(CURSOR_KIND.load(Ordering::Relaxed))).set();
+}
 
 fn cursor_for(kind: CursorKind) -> Retained<NSCursor> {
     match kind {
@@ -98,8 +133,24 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, _event: &NSEvent) {
-            let mtm = self.mtm();
-            NSApplication::sharedApplication(mtm).preventWindowOrdering();
+            // Pinned on top: never reorder. Not pinned: let the click raise
+            // the overlay (within the normal level) like any window.
+            if ALWAYS_ON_TOP.load(Ordering::Relaxed) {
+                let mtm = self.mtm();
+                NSApplication::sharedApplication(mtm).preventWindowOrdering();
+            }
+        }
+
+        // Delivered through the ActiveAlways tracking area while the overlay
+        // accepts mouse events; keeps our cursor applied in the background.
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, _event: &NSEvent) {
+            apply_current_cursor();
+        }
+
+        #[unsafe(method(cursorUpdate:))]
+        fn cursor_update(&self, _event: &NSEvent) {
+            apply_current_cursor();
         }
 
         #[unsafe(method(mouseUp:))]
@@ -110,8 +161,10 @@ define_class!(
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, _event: &NSEvent) {
-            let mtm = self.mtm();
-            NSApplication::sharedApplication(mtm).preventWindowOrdering();
+            if ALWAYS_ON_TOP.load(Ordering::Relaxed) {
+                let mtm = self.mtm();
+                NSApplication::sharedApplication(mtm).preventWindowOrdering();
+            }
         }
 
         #[unsafe(method(rightMouseUp:))]
@@ -275,6 +328,21 @@ pub fn install_sink_view(ptr: *mut c_void) {
     view.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
+    let options = NSTrackingAreaOptions::MouseMoved
+        | NSTrackingAreaOptions::CursorUpdate
+        | NSTrackingAreaOptions::ActiveAlways
+        | NSTrackingAreaOptions::InVisibleRect;
+    let owner: &AnyObject = &view;
+    let area = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            NSTrackingArea::alloc(),
+            frame,
+            options,
+            Some(owner),
+            None,
+        )
+    };
+    view.addTrackingArea(&area);
     content.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Above, None);
 }
 
@@ -491,6 +559,65 @@ pub fn own_window_at_point(x: f64, y: f64, exclude: &[i64]) -> bool {
             .and_then(|n| n.to_i64())
             .unwrap_or(-1);
         if exclude.contains(&num) {
+            continue;
+        }
+        let Some(bounds) = item.find(&k_bounds).and_then(|v| v.downcast::<CFDictionary>()) else {
+            continue;
+        };
+        let bounds: CFDictionary =
+            unsafe { CFDictionary::wrap_under_get_rule(bounds.as_concrete_TypeRef()) };
+        let Some(r) = CGRect::from_dict_representation(&bounds) else {
+            continue;
+        };
+        if x >= r.origin.x
+            && y >= r.origin.y
+            && x < r.origin.x + r.size.width
+            && y < r.origin.y + r.size.height
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when a window stacked above the pet overlay covers the point (CG
+/// top-left coordinates). Only relevant when the overlay is not pinned on
+/// top: then a normal app window can hide the pet, and input over it must
+/// not be routed to the pet. Other apps' windows count only at the normal
+/// layer (transparent utility overlays live on higher layers); our own
+/// windows count unless they are the click-through overlays in `overlays`.
+pub fn covered_above_overlay(x: f64, y: f64, main_number: i64, overlays: &[i64]) -> bool {
+    let pid = std::process::id() as i64;
+    let Some(list) = copy_window_info(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID,
+    ) else {
+        return false;
+    };
+    let list: CFArray<CFDictionary<CFString, CFType>> =
+        unsafe { CFArray::wrap_under_get_rule(list.as_concrete_TypeRef()) };
+    let k_pid = CFString::from_static_string("kCGWindowOwnerPID");
+    let k_num = CFString::from_static_string("kCGWindowNumber");
+    let k_layer = CFString::from_static_string("kCGWindowLayer");
+    let k_bounds = CFString::from_static_string("kCGWindowBounds");
+    let num_of = |item: &CFDictionary<CFString, CFType>, key: &CFString| {
+        item.find(key)
+            .and_then(|v| v.downcast::<CFNumber>())
+            .and_then(|n| n.to_i64())
+            .unwrap_or(-1)
+    };
+    // The list is ordered front to back: everything before the overlay is above it.
+    for item in list.iter() {
+        let number = num_of(&item, &k_num);
+        if number == main_number {
+            return false;
+        }
+        let owner = num_of(&item, &k_pid);
+        if owner == pid {
+            if overlays.contains(&number) {
+                continue;
+            }
+        } else if num_of(&item, &k_layer) != 0 {
             continue;
         }
         let Some(bounds) = item.find(&k_bounds).and_then(|v| v.downcast::<CFDictionary>()) else {

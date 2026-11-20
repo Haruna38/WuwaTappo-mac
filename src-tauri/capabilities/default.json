@@ -163,6 +163,9 @@
     "allow-download-and-open-installer",
     "allow-is-elevated-autostart-enabled",
     "allow-set-elevated-autostart",
-    "allow-exit-app"
+    "allow-exit-app",
+    "allow-load-reset-click-archive",
+    "allow-reset-local-data",
+    "allow-run-network-diagnostics"
   ]
 }

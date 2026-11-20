@@ -124,12 +124,12 @@ fn ensure(app: &AppHandle, spec: Spec) -> tauri::Result<(WebviewWindow, bool)> {
         }
         if is_overlay {
             if let Some(state) = app3.try_state::<AppState>() {
-                state
-                    .input
-                    .lock()
-                    .unwrap()
-                    .overlay_window_numbers
-                    .push(macos::window_number(ptr));
+                let number = macos::window_number(ptr);
+                let mut s = state.input.lock().unwrap();
+                s.overlay_window_numbers.push(number);
+                if is_main {
+                    s.main_window_number = number;
+                }
             }
         }
     })?;
@@ -172,6 +172,10 @@ pub fn refresh_main_geometry(app: &AppHandle) {
         s.origin_x = pos.x as f64 / scale;
         s.origin_y = pos.y as f64 / scale;
         s.scale = scale;
+        if let Ok(size) = main.outer_size() {
+            s.overlay_w = size.width as f64 / scale;
+            s.overlay_h = size.height as f64 / scale;
+        }
     }
 }
 
@@ -646,15 +650,48 @@ pub async fn hide_toast_overlay(app: AppHandle) -> Result<(), String> {
 
 // ---------------------------------------------------------------- main window geometry
 
+/// Size the overlay to its display. Since 1.0.5 the frontend may pass the
+/// target display's bounds (physical px) to retry a display switch.
 #[tauri::command]
-pub async fn set_main_window_fullscreen_shell(app: AppHandle) -> Result<(), String> {
+pub async fn set_main_window_fullscreen_shell(
+    app: AppHandle,
+    payload: Option<MonitorBoundsPayload>,
+) -> Result<(), String> {
     let main = app.get_webview_window(MAIN).ok_or("main window missing")?;
-    cover_monitor(&app, &main).map_err(|e| e.to_string())?;
-    if let Some(t) = app.get_webview_window(TOAST) {
-        let _ = cover_monitor(&app, &t);
+    match payload {
+        Some(p) if p.width > 0.0 && p.height > 0.0 => move_overlays_to(&app, &main, &p)?,
+        _ => {
+            cover_monitor(&app, &main).map_err(|e| e.to_string())?;
+            if let Some(t) = app.get_webview_window(TOAST) {
+                let _ = cover_monitor(&app, &t);
+            }
+        }
     }
     refresh_main_geometry(&app);
     input::reevaluate(&app);
+    Ok(())
+}
+
+/// Move the pet overlay and the toast overlay onto the display described by
+/// `p` (physical px in Tauri's coordinate space).
+fn move_overlays_to(app: &AppHandle, main: &WebviewWindow, p: &MonitorBoundsPayload) -> Result<(), String> {
+    let scale = app
+        .monitor_from_point(p.x + 1.0, p.y + 1.0)
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or_else(|| main.scale_factor().unwrap_or(1.0));
+    let (x, y, w, h) = (p.x / scale, p.y / scale, p.width / scale, p.height / scale);
+    for label in [MAIN, TOAST] {
+        let Some(win) = app.get_webview_window(label) else {
+            continue;
+        };
+        let ptr = win.ns_window().map_err(|e| e.to_string())? as usize;
+        win.run_on_main_thread(move || {
+            macos::set_frame_top_left(ptr as *mut std::ffi::c_void, x, y, w, h);
+        })
+        .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -681,17 +718,32 @@ pub struct ApplyPositionPayload {
 pub async fn apply_main_window_position(app: AppHandle, payload: ApplyPositionPayload) -> Result<(), String> {
     // Levels are managed natively (see macos::LEVEL_MAIN); tao's
     // set_always_on_top would drop the overlay to NSFloatingWindowLevel.
-    if let Some(main) = app.get_webview_window(MAIN) {
-        let ptr = main.ns_window().map_err(|e| e.to_string())? as usize;
-        let on_top = payload.always_on_top.unwrap_or(true);
-        let _ = main.run_on_main_thread(move || {
-            macos::set_level(
-                ptr as *mut std::ffi::c_void,
-                if on_top { LEVEL_MAIN } else { 0 },
-            );
-        });
+    // With "Always on top" off the pet and its toasts become normal-level
+    // windows that other apps can cover.
+    let on_top = payload.always_on_top.unwrap_or(true);
+    let changed = {
+        let state = app.state::<AppState>();
+        let mut s = state.input.lock().unwrap();
+        std::mem::replace(&mut s.always_on_top, on_top) != on_top
+    };
+    macos::set_always_on_top(on_top);
+    if changed {
+        log::info!("[main] event=always_on_top enabled={on_top}");
+    }
+    for (label, pinned_level) in [(MAIN, LEVEL_MAIN), (TOAST, LEVEL_TOAST)] {
+        if let Some(win) = app.get_webview_window(label) {
+            let ptr = win.ns_window().map_err(|e| e.to_string())? as usize;
+            let _ = win.run_on_main_thread(move || {
+                let p = ptr as *mut std::ffi::c_void;
+                macos::set_level(p, if on_top { pinned_level } else { 0 });
+                if on_top {
+                    macos::order_front(p);
+                }
+            });
+        }
     }
     refresh_main_geometry(&app);
+    input::reevaluate(&app);
     Ok(())
 }
 
@@ -743,31 +795,7 @@ pub async fn set_main_window_monitor_bounds(
         ui.monitor_switch_in_progress = true;
     }
     let main = app.get_webview_window(MAIN).ok_or("main window missing")?;
-    // Payload is physical px in Tauri's coordinate space; find the monitor to
-    // get its scale factor, then set the frame in points.
-    let scale = app
-        .monitor_from_point(payload.x + 1.0, payload.y + 1.0)
-        .ok()
-        .flatten()
-        .map(|m| m.scale_factor())
-        .unwrap_or_else(|| main.scale_factor().unwrap_or(1.0));
-    let ptr = main.ns_window().map_err(|e| e.to_string())? as usize;
-    let (x, y, w, h) = (
-        payload.x / scale,
-        payload.y / scale,
-        payload.width / scale,
-        payload.height / scale,
-    );
-    main.run_on_main_thread(move || {
-        macos::set_frame_top_left(ptr as *mut std::ffi::c_void, x, y, w, h);
-    })
-    .map_err(|e| e.to_string())?;
-    if let Some(t) = app.get_webview_window(TOAST) {
-        let tptr = t.ns_window().map_err(|e| e.to_string())? as usize;
-        let _ = t.run_on_main_thread(move || {
-            macos::set_frame_top_left(tptr as *mut std::ffi::c_void, x, y, w, h);
-        });
-    }
+    move_overlays_to(&app, &main, &payload)?;
     refresh_main_geometry(&app);
     Ok(())
 }
@@ -950,18 +978,25 @@ pub async fn popup_main_dock_context_menu(
     let st = state.ui.lock().unwrap().menu.clone();
     let menu = crate::menu::build_menu(&app, &st, true).map_err(|e| e.to_string())?;
     log::info!("[menu] pre-popup x={x} y={y}");
-    // Park the overlay below the NSMenu window level while the menu is open.
+    // Park the pinned overlay below the NSMenu window level while the menu
+    // is open; an unpinned overlay already sits below it.
+    let pinned = state.input.lock().unwrap().always_on_top;
     let ptr = main.ns_window().map_err(|e| e.to_string())? as usize;
-    let _ = main.run_on_main_thread(move || {
-        macos::set_level(ptr as *mut std::ffi::c_void, macos::LEVEL_MENU_PARKED);
-    });
+    if pinned {
+        let _ = main.run_on_main_thread(move || {
+            macos::set_level(ptr as *mut std::ffi::c_void, macos::LEVEL_MENU_PARKED);
+        });
+    }
     // Blocks until the menu is dismissed (NSMenu popup is synchronous).
     let r = main
         .popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))
         .map_err(|e| e.to_string());
-    let _ = main.run_on_main_thread(move || {
-        macos::set_level(ptr as *mut std::ffi::c_void, LEVEL_MAIN);
-    });
+    // Re-read: the setting may have been toggled while the menu was open.
+    if state.input.lock().unwrap().always_on_top {
+        let _ = main.run_on_main_thread(move || {
+            macos::set_level(ptr as *mut std::ffi::c_void, LEVEL_MAIN);
+        });
+    }
     log::info!("[menu] post-popup");
     r
 }

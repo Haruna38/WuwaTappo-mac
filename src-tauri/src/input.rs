@@ -165,7 +165,7 @@ fn handle_event(app: &AppHandle, ty: CGEventType, ev: &CGEvent, start: &Instant)
         | CGEventType::RightMouseDragged
         | CGEventType::OtherMouseDragged => {
             let loc = ev.location();
-            let (member, emit, px, py) = {
+            let (member, emit, left, px, py) = {
                 let mut s = state.input.lock().unwrap();
                 s.pointer_x = loc.x;
                 s.pointer_y = loc.y;
@@ -174,9 +174,17 @@ fn handle_event(app: &AppHandle, ty: CGEventType, ev: &CGEvent, start: &Instant)
                 if emit {
                     s.last_move_emit_ns = now;
                 }
+                let (lx, ly) = (loc.x - s.origin_x, loc.y - s.origin_y);
+                let on_overlay = lx >= 0.0 && ly >= 0.0 && lx < s.overlay_w && ly < s.overlay_h;
+                let left = s.pointer_on_overlay && !on_overlay;
+                s.pointer_on_overlay = on_overlay;
                 let member = evaluate_capture_locked(app, &mut s);
-                (member, emit, loc.x * s.scale, loc.y * s.scale)
+                (member, emit, left, loc.x * s.scale, loc.y * s.scale)
             };
+            if left {
+                // Pointer moved to another display: let the page drop hover state.
+                let _ = app.emit("mouse-leave", ());
+            }
             if emit {
                 let _ = app.emit(
                     "mouse-move",
@@ -281,18 +289,10 @@ fn handle_event(app: &AppHandle, ty: CGEventType, ev: &CGEvent, start: &Instant)
 }
 
 fn match_shortcut(sc: &crate::state::AppShortcuts, code: u16, mods: u32) -> Option<&'static str> {
-    let check = |b: &crate::state::Binding| -> bool {
-        b.key != 0 && keys::vk_to_mac(b.key) == Some(code) && b.modifiers == mods
-    };
-    if check(&sc.toggle_pet) {
-        Some("togglePet")
-    } else if check(&sc.game_mode) {
-        Some("gameMode")
-    } else if check(&sc.switch_screen) {
-        Some("switchScreen")
-    } else {
-        None
-    }
+    sc.actions()
+        .into_iter()
+        .find(|(_, b)| b.key != 0 && keys::vk_to_mac(b.key) == Some(code) && b.modifiers == mods)
+        .map(|(name, _)| name)
 }
 
 /// Decide whether the overlay should capture mouse events at the current
@@ -313,6 +313,19 @@ pub fn evaluate_capture_locked(app: &AppHandle, s: &mut crate::state::InputState
                 }
             }
         }
+    }
+    if inside
+        && !s.always_on_top
+        && macos::covered_above_overlay(
+            s.pointer_x,
+            s.pointer_y,
+            s.main_window_number,
+            &s.overlay_window_numbers,
+        )
+    {
+        // Not pinned on top and another window hides the pet here.
+        inside = false;
+        member = None;
     }
     let want = inside || (s.swallow && !s.window_passthrough);
     if want != s.capturing {

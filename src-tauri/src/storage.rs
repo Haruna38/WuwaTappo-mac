@@ -127,3 +127,60 @@ pub fn save_ui_locale(app: &AppHandle, locale: &str) -> Result<(), String> {
         },
     )
 }
+
+pub fn remove_cumulative_click(app: &AppHandle, environment: &str) {
+    let name = format!("cumulative_click_{}.json", sanitize(environment));
+    let _ = std::fs::remove_file(data_dir(app).join(name));
+}
+
+pub fn remove_shortcuts(app: &AppHandle) {
+    let _ = std::fs::remove_file(data_dir(app).join("shortcuts.json"));
+}
+
+/// Click totals preserved across "Reset App", keyed by account id. The
+/// reset wipes the WebView profile and the cumulative store; the frontend
+/// asks for this after the next login so no clicks are lost.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ResetClickArchive {
+    environment: String,
+    counts: std::collections::BTreeMap<String, u64>,
+}
+
+fn reset_archive_name(environment: &str) -> String {
+    format!("reset_click_archive_{}.json", sanitize(environment))
+}
+
+pub fn load_reset_click_archive(app: &AppHandle, environment: &str, cuid: &str) -> u64 {
+    read_json::<ResetClickArchive>(app, &reset_archive_name(environment))
+        .filter(|a| a.environment == environment)
+        .and_then(|a| a.counts.get(cuid).copied())
+        .unwrap_or(0)
+}
+
+pub fn save_reset_click_archive(
+    app: &AppHandle,
+    environment: &str,
+    cuid: &str,
+    count: u64,
+) -> Result<(), String> {
+    let name = reset_archive_name(environment);
+    let mut archive = read_json::<ResetClickArchive>(app, &name)
+        .filter(|a| a.environment == environment)
+        .unwrap_or_default();
+    archive.environment = environment.to_string();
+    let entry = archive.counts.entry(cuid.to_string()).or_insert(0);
+    *entry = (*entry).max(count);
+    write_json(app, &name, &archive)
+}
+
+const PENDING_RESET_MARKER: &str = "pending_reset";
+
+/// Ask the next launch to wipe the WebView profile before any webview exists.
+pub fn mark_pending_reset(app: &AppHandle) -> Result<(), String> {
+    std::fs::write(data_dir(app).join(PENDING_RESET_MARKER), b"1").map_err(|e| e.to_string())
+}
+
+pub fn take_pending_reset(app: &AppHandle) -> bool {
+    let path = data_dir(app).join(PENDING_RESET_MARKER);
+    path.exists() && std::fs::remove_file(path).is_ok()
+}

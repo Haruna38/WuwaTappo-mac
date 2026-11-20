@@ -49,6 +49,27 @@ pub struct AppShortcuts {
     pub game_mode: Binding,
     pub switch_screen: Binding,
     pub toggle_pet: Binding,
+    // Added in 1.0.5; unbound by default (and absent from older files).
+    #[serde(default)]
+    pub always_on_top: Binding,
+    #[serde(default)]
+    pub auto_game_mode_on_fullscreen: Binding,
+    #[serde(default)]
+    pub disable_pointer_monitoring: Binding,
+}
+
+impl AppShortcuts {
+    /// Every binding with the action name the frontend expects in `app-shortcut`.
+    pub fn actions(&self) -> [(&'static str, Binding); 6] {
+        [
+            ("togglePet", self.toggle_pet),
+            ("gameMode", self.game_mode),
+            ("switchScreen", self.switch_screen),
+            ("alwaysOnTop", self.always_on_top),
+            ("autoGameModeOnFullscreen", self.auto_game_mode_on_fullscreen),
+            ("disablePointerMonitoring", self.disable_pointer_monitoring),
+        ]
+    }
 }
 
 impl Default for AppShortcuts {
@@ -57,6 +78,9 @@ impl Default for AppShortcuts {
             game_mode: Binding { modifiers: 0, key: 118 },
             switch_screen: Binding { modifiers: 0, key: 119 },
             toggle_pet: Binding { modifiers: 0, key: 120 },
+            always_on_top: Binding::default(),
+            auto_game_mode_on_fullscreen: Binding::default(),
+            disable_pointer_monitoring: Binding::default(),
         }
     }
 }
@@ -92,6 +116,15 @@ pub struct InputState {
     /// *other* window of ours (panel, dialogs) are handled by that window's
     /// DOM and must not be counted again.
     pub overlay_window_numbers: Vec<i64>,
+    /// CGWindowID of the pet overlay itself.
+    pub main_window_number: i64,
+    /// Overlay size (logical), to detect the pointer leaving its display.
+    pub overlay_w: f64,
+    pub overlay_h: f64,
+    pub pointer_on_overlay: bool,
+    /// "Always on top" setting; when off the overlay is a normal-level
+    /// window and other apps' windows can cover the pet.
+    pub always_on_top: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -204,6 +237,7 @@ impl Default for AppState {
         Self {
             input: Arc::new(Mutex::new(InputState {
                 scale: 1.0,
+                always_on_top: true,
                 ..Default::default()
             })),
             ui: Arc::new(Mutex::new(UiState::default())),

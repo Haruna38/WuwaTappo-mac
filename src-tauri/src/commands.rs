@@ -141,7 +141,7 @@ pub fn set_app_shortcuts(
     state: State<'_, AppState>,
     config: AppShortcuts,
 ) -> Result<(), String> {
-    let all = [config.game_mode, config.switch_screen, config.toggle_pet];
+    let all = config.actions().map(|(_, b)| b);
     for i in 0..all.len() {
         for j in (i + 1)..all.len() {
             if binding_is_set(&all[i]) && all[i] == all[j] {
@@ -467,4 +467,237 @@ pub async fn exit_app(_app: AppHandle) {
     // Skip Tauri/tao teardown: the windows are re-classed NSPanels whose
     // dealloc path raises; the frontend has already flushed its state.
     std::process::exit(0);
+}
+
+// ---------------------------------------------------------------- reset app
+
+fn to_count(v: f64) -> u64 {
+    if v.is_finite() && v > 0.0 {
+        v.floor() as u64
+    } else {
+        0
+    }
+}
+
+#[tauri::command]
+pub fn load_reset_click_archive(app: AppHandle, environment: String, cuid: String) -> u64 {
+    storage::load_reset_click_archive(&app, &environment, cuid.trim())
+}
+
+static RESET_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Settings > "Reset App": clear the WebView profile (settings, login,
+/// caches), restore default shortcuts and autostart, keep the click totals,
+/// then restart. The profile is wiped by the next launch before any webview
+/// is created (see `clear_webview_profile`), which is the only point where
+/// WebKit is guaranteed not to be holding or rewriting it.
+#[tauri::command]
+pub async fn reset_local_data(
+    app: AppHandle,
+    window: tauri::Window,
+    environment: String,
+    local_count: f64,
+    cumulative_count: Option<f64>,
+    cuid: String,
+    #[allow(unused_variables)] failure_message: Option<String>,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    if window.label() != crate::windows::MAIN {
+        return Err("reset must be coordinated by main".into());
+    }
+    if environment.trim().is_empty() {
+        return Err("invalid environment".into());
+    }
+    if RESET_RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("reset already running".into());
+    }
+    log::info!("[reset-local-data] started");
+    let prepare = || -> Result<(), String> {
+        let cuid = cuid.trim();
+        let stored = storage::load_cumulative_click(&app, &environment);
+        let stored_for_cuid = if !cuid.is_empty() && stored.cuid == cuid { stored.count } else { 0 };
+        let cumulative = cumulative_count.map(to_count).unwrap_or(0).max(stored_for_cuid);
+        if !cuid.is_empty() && cumulative > 0 {
+            storage::save_reset_click_archive(&app, &environment, cuid, cumulative)?;
+        }
+        let pool = to_count(local_count).max(storage::load_key_press_count(&app, &environment));
+        storage::save_key_press_count(&app, &environment, pool)?;
+        storage::remove_cumulative_click(&app, &environment);
+        storage::remove_shortcuts(&app);
+        {
+            use tauri_plugin_autostart::ManagerExt;
+            let _ = app.autolaunch().disable();
+        }
+        storage::mark_pending_reset(&app)
+    };
+    let result = prepare().and_then(|()| crate::relaunch());
+    match result {
+        Ok(()) => {
+            log::info!("[reset-local-data] archived click totals; restarting to clear the profile");
+            std::process::exit(0)
+        }
+        Err(e) => {
+            RESET_RUNNING.store(false, Ordering::SeqCst);
+            log::error!("[reset-local-data] failed: {e}");
+            Err(format!("local data reset failed: {e}"))
+        }
+    }
+}
+
+/// Delete the WebView profile of this app. Must run before any webview is
+/// created. Our own JSON stores under Application Support are untouched.
+pub fn clear_webview_profile(app: &AppHandle) {
+    let Ok(home) = app.path().home_dir() else {
+        return;
+    };
+    let id = app.config().identifier.clone();
+    let lib = home.join("Library");
+    for dir in [
+        lib.join("WebKit").join(&id),
+        lib.join("Caches").join(&id),
+        lib.join("HTTPStorages").join(&id),
+    ] {
+        if dir.exists() {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => log::info!("[reset-local-data] removed {}", dir.display()),
+                Err(e) => log::error!("[reset-local-data] could not remove {}: {e}", dir.display()),
+            }
+        }
+    }
+    let _ = std::fs::remove_file(lib.join("HTTPStorages").join(format!("{id}.binarycookies")));
+    log::info!("[reset-local-data] WebView profile data cleared");
+}
+
+// ---------------------------------------------------------------- network diagnostics
+
+#[derive(Serialize)]
+pub struct NetworkDiagnostics {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_source: Option<&'static str>,
+}
+
+static NETWORK_DIAGNOSTICS_DONE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+async fn diag_dns(run_id: &str, target: &str, url: &str) {
+    let Some(host) = tauri::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)) else {
+        return;
+    };
+    let started = std::time::Instant::now();
+    let lookup_host = host.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        use std::net::ToSocketAddrs;
+        (lookup_host.as_str(), 443)
+            .to_socket_addrs()
+            .map(|it| it.map(|a| a.ip().to_string()).collect::<Vec<_>>())
+    })
+    .await;
+    let ms = started.elapsed().as_millis();
+    match res {
+        Ok(Ok(addrs)) if !addrs.is_empty() => log::info!(
+            target: "app",
+            "[NETWORK] event=diagnostic_native_dns run_id={run_id} target={target} host={host} result=ok addresses={} elapsed_ms={ms}",
+            addrs.join(",")
+        ),
+        Ok(Ok(_)) => log::warn!(
+            target: "app",
+            "[NETWORK] event=diagnostic_native_dns run_id={run_id} target={target} host={host} result=no_records elapsed_ms={ms}"
+        ),
+        other => log::warn!(
+            target: "app",
+            "[NETWORK] event=diagnostic_native_dns run_id={run_id} target={target} host={host} result=failed reason={:?} elapsed_ms={ms}",
+            other.map(|r| r.map(|_| ()).map_err(|e| e.to_string()))
+        ),
+    }
+}
+
+async fn diag_http(client: &reqwest::Client, run_id: &str, target: &str, url: &str) -> Option<serde_json::Value> {
+    let started = std::time::Instant::now();
+    match client.get(url).header("Accept", "application/json").send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let remote = resp.remote_addr().map(|a| a.to_string()).unwrap_or_default();
+            let body = resp.json::<serde_json::Value>().await.ok();
+            log::info!(
+                target: "app",
+                "[NETWORK] event=diagnostic_native_http run_id={run_id} target={target} status={} remote={remote} json_parsed={} elapsed_ms={}",
+                status.as_u16(),
+                body.is_some(),
+                started.elapsed().as_millis()
+            );
+            if status.is_success() { body } else { None }
+        }
+        Err(e) => {
+            log::warn!(
+                target: "app",
+                "[NETWORK] event=diagnostic_native_http run_id={run_id} target={target} result=failed timeout={} connect={} reason={e} elapsed_ms={}",
+                e.is_timeout(),
+                e.is_connect(),
+                started.elapsed().as_millis()
+            );
+            None
+        }
+    }
+}
+
+/// Native half of the frontend's connectivity self-check (it runs once when
+/// the app cannot reach the API): DNS and HTTPS probes made outside the
+/// WebView, written to the app log. Returns the update-manifest host file
+/// URL when the caller could not learn the assets host itself.
+#[tauri::command]
+pub async fn run_network_diagnostics(
+    #[allow(unused_variables)] region: Option<String>,
+    api_base: Option<String>,
+    assets_host: Option<String>,
+    #[allow(unused_variables)] pre_release: Option<bool>,
+    run_id: Option<String>,
+) -> NetworkDiagnostics {
+    use std::sync::atomic::Ordering;
+    if NETWORK_DIAGNOSTICS_DONE.swap(true, Ordering::SeqCst) {
+        return NetworkDiagnostics { status: "already_collected", resource_url: None, resource_source: None };
+    }
+    let run_id = run_id.unwrap_or_default();
+    let api = api_base
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| API_HOST.to_string());
+    let api = api.trim_end_matches('/').to_string();
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    else {
+        return NetworkDiagnostics { status: "client_unavailable", resource_url: None, resource_source: None };
+    };
+
+    let config_url = format!("{api}/api/common/activity-config");
+    diag_dns(&run_id, "api", &config_url).await;
+    let config = diag_http(&client, &run_id, "api", &config_url).await;
+
+    let known_host = assets_host.filter(|s| !s.trim().is_empty());
+    let native_host = config
+        .as_ref()
+        .and_then(|c| c.pointer("/data/assets_host"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let (host, from_native) = match (known_host, native_host) {
+        (Some(h), _) => (Some(h), false),
+        (None, Some(h)) => (Some(h), true),
+        (None, None) => (None, false),
+    };
+    let mut resource_url = None;
+    if let Some(host) = host {
+        let url = format!("{}/app/json-host/latest-global_host.json", host.trim_end_matches('/'));
+        diag_dns(&run_id, "resources", &url).await;
+        let _ = diag_http(&client, &run_id, "resources", &url).await;
+        if from_native {
+            resource_url = Some(url);
+        }
+    }
+    NetworkDiagnostics {
+        status: "complete",
+        resource_source: resource_url.as_ref().map(|_| "native_activity_config"),
+        resource_url,
+    }
 }

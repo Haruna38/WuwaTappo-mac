@@ -1,6 +1,6 @@
 [package]
 name = "wuwatappo"
-version = "1.0.4"
+version = "1.0.5"
 description = "Wuwa Tappo (native macOS port)"
 edition = "2021"
 
@@ -26,7 +26,7 @@ serde_json = "1"
 log = "0.4"
 time = { version = "0.3", features = ["formatting"] }
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSScreen", "NSApplication", "NSRunningApplication", "NSWorkspace", "NSCursor", "NSView", "NSEvent", "NSResponder", "NSGraphics", "NSPanel"] }
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSScreen", "NSApplication", "NSRunningApplication", "NSWorkspace", "NSCursor", "NSView", "NSEvent", "NSResponder", "NSGraphics", "NSPanel", "NSTrackingArea"] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString", "NSArray", "NSDictionary", "NSValue", "NSUserDefaults", "NSProcessInfo", "NSObject", "NSEnumerator"] }
 core-graphics = "0.24"
 core-foundation = "0.10"

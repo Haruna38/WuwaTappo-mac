@@ -56,6 +56,36 @@ fn start_main_thread_watchdog(app: tauri::AppHandle) {
         .expect("spawn watchdog");
 }
 
+/// Start a fresh instance of the app shortly after this process is gone.
+/// Used instead of Tauri's in-process restart: that path tears the windows
+/// down through tao (which raises for our re-classed NSPanels) and races the
+/// single-instance lock. The caller must exit right after an `Ok`.
+pub(crate) fn relaunch() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // Single-quote for sh: close the quote, emit an escaped quote, reopen.
+    let quote = |p: &std::path::Path| format!("'{}'", p.to_string_lossy().replace('\'', r"'\''"));
+    // <bundle>.app/Contents/MacOS/<exe>
+    let bundle = exe
+        .ancestors()
+        .nth(3)
+        .filter(|p| p.extension().map_or(false, |e| e == "app"));
+    // -g: start in the background, so restarting while a full-screen app is
+    // in front does not pull the user out of its Space.
+    let launch = match bundle {
+        Some(b) => format!("/usr/bin/open -g {}", quote(b)),
+        None => format!("{} &", quote(&exe)),
+    };
+    std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("sleep 1.5; {launch}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not schedule relaunch: {e}"))
+}
+
 pub fn run() {
     std::panic::set_hook(Box::new(|info| {
         let bt = std::backtrace::Backtrace::force_capture();
@@ -99,6 +129,8 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        // A desktop pet must not steal focus (or switch Spaces) when it starts.
+        .activate_ignoring_other_apps(false)
         .manage(AppState::default())
         .on_menu_event(|app, event| menu::handle_menu_event(app, event))
         .setup(|app| {
@@ -107,6 +139,10 @@ pub fn run() {
                 let state = handle.state::<AppState>();
                 state.input.lock().unwrap().shortcuts = storage::load_shortcuts(&handle);
             }
+            if storage::take_pending_reset(&handle) {
+                commands::clear_webview_profile(&handle);
+            }
+            macos::enable_background_cursor();
             if let Err(e) = server::start(handle.clone()) {
                 log::error!("[http] {e}; multiplayer sockets will be rejected by the server");
             }
@@ -196,14 +232,23 @@ pub fn run() {
             commands::is_elevated_autostart_enabled,
             commands::set_elevated_autostart,
             commands::exit_app,
+            commands::load_reset_click_archive,
+            commands::reset_local_data,
+            commands::run_network_diagnostics,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
-                // Closing the last window must not quit a tray app.
-                if code.is_none() {
-                    api.prevent_exit();
+                match code {
+                    // Closing the last window must not quit a tray app.
+                    None => api.prevent_exit(),
+                    // "Restart App" / post-update restart (plugin:process|restart).
+                    Some(c) if *c == tauri::RESTART_EXIT_CODE => match relaunch() {
+                        Ok(()) => std::process::exit(0),
+                        Err(e) => log::error!("[APP] {e}; falling back to in-process restart"),
+                    },
+                    Some(_) => {}
                 }
             }
             if let tauri::RunEvent::Exit = event {

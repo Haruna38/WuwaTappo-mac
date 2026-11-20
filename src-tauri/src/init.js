@@ -91,6 +91,26 @@
     } catch (e2) {}
   }
 
+  // ---------- click-to-focus for sliders ----------
+  // WebKit on macOS does not move keyboard focus to non-text controls on
+  // click (Chromium/WebView2, which the app was built for, does), so a
+  // clicked slider would ignore the arrow keys. Focus it after WebKit's own
+  // mousedown handling, which would otherwise clear the focus again.
+  document.addEventListener(
+    "mousedown",
+    function (e) {
+      var t = e.target;
+      if (t && t.tagName === "INPUT" && t.type === "range") {
+        setTimeout(function () {
+          if (document.activeElement !== t) {
+            try { t.focus({ preventScroll: true }); } catch (err) {}
+          }
+        }, 0);
+      }
+    },
+    true
+  );
+
   // ---------- console/error forwarding to the Rust log ----------
   function fwd(level, args) {
     try {
